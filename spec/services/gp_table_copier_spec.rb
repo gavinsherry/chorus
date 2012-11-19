@@ -4,38 +4,56 @@ describe GpTableCopier, :database_integration => true do
   let(:account) { InstanceIntegration.real_gpdb_account }
   let(:user) { account.owner }
   let(:database) { InstanceIntegration.real_database }
+  let(:instance) { database.gpdb_instance }
   let(:schema) { database.schemas.find_by_name('test_schema') }
   let(:source_table_name) { "src_table" }
   let(:source_dataset) { schema.datasets.find_by_name(source_table_name) }
   let(:sandbox) { schema } # For testing purposes, src schema = sandbox
-  let(:destination_table_name) { "dst_table" }
+  let(:destination_table_name) { "new_dst_table" }
   let(:destination_table_fullname) { "\"#{sandbox.name}\".\"#{destination_table_name}\"" }
   let(:table_def) { '"id" integer, "name" text, "id2" integer, "id3" integer, PRIMARY KEY("id2", "id3", "id")' }
   let(:distrib_def) { 'DISTRIBUTED BY("id2", "id3")' }
-  let(:attributes) { {"workspace_id" => workspace.id, "to_table" => destination_table_name, "new_table" => "true", "import_id" => import.id } }
+
+  # To do an import:
+  #database = Sequel.connect('jdbc:postgresql://local_greenplum:5432/gpdb_noe_tes?user=foo&password=bar')
+  #
+  #dataset = database[Sequel.qualify('schemaname', 'tablename')]
+  #dataset = database['select * from foo limit 1']
+
+  let(:from_table) { source_dataset.as_sequel }
+  let(:attributes) { {"sandbox_name" => workspace.sandbox.name,
+                      "to_table" => destination_table_name,
+                      "from_table" => from_table,
+                      "new_table" => "true" } }
+
+  let(:gpdb_database_path) { Sequel.connect(Gpdb::ConnectionBuilder.url(database, account), :logger => Rails.logger) }
+  let(:test_gpdb_database_path) { Sequel.connect(Gpdb::ConnectionBuilder.url(database, account)) }
   let(:add_rows) { true }
   let(:workspace) { FactoryGirl.create :workspace, :owner => user, :sandbox => sandbox }
   let(:import) { imports(:two) }
-  let(:copier) { GpTableCopier.new(source_dataset_id, user.id, attributes) }
+  let(:copier) { GpTableCopier.new(gpdb_database_path, attributes) }
   let(:start_import ) { copier.start }
 
-  describe "#start" do
-    let(:source_dataset_id) { source_dataset.id }
+  #after do
+  #  db.rollback(savepoint_name)
+  #end
 
+
+  describe "#start" do
     before do
-      call_sql("drop table if exists \"#{source_table_name}\";")
-      call_sql("drop table if exists \"#{destination_table_name}\";")
-      call_sql("create table \"#{source_table_name}\"(#{table_def}) #{distrib_def};")
+      execute("drop table if exists \"#{source_table_name}\";")
+      execute("drop table if exists \"#{destination_table_name}\";")
+      execute("create table \"#{source_table_name}\"(#{table_def}) #{distrib_def};")
       Dataset.refresh(account, schema)
       if add_rows
-        call_sql("insert into \"#{source_table_name}\"(id, name, id2, id3) values (1, 'marsbar', 3, 5);")
-        call_sql("insert into \"#{source_table_name}\"(id, name, id2, id3) values (2, 'kitkat', 4, 6);")
+        execute("insert into \"#{source_table_name}\"(id, name, id2, id3) values (1, 'marsbar', 3, 5);")
+        execute("insert into \"#{source_table_name}\"(id, name, id2, id3) values (2, 'kitkat', 4, 6);")
       end
     end
 
     after do
-      call_sql("DROP TABLE IF EXISTS \"#{schema.name}\".\"#{source_table_name}\";") unless source_table_name =~ /^candy/
-      call_sql("DROP TABLE IF EXISTS \"#{sandbox.name}\".\"#{destination_table_name}\";") unless (
+      execute("DROP TABLE IF EXISTS \"#{schema.name}\".\"#{source_table_name}\";") unless source_table_name =~ /^candy/
+      execute("DROP TABLE IF EXISTS \"#{sandbox.name}\".\"#{destination_table_name}\";") unless (
       (destination_table_name == source_table_name) || destination_table_name == "other_base_table")
     end
 
@@ -46,29 +64,34 @@ describe GpTableCopier, :database_integration => true do
 
       it "creates a new table copier and runs it" do
         start_import
-        dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+        dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
         dest_rows.count.should == 2
       end
 
       context "when the source table cannot be found" do
-        let(:source_dataset_id) { -1 }
+        let(:from_table) { FactoryGirl.create(:gpdb_table, :name => "Im_not_a_real_table").as_sequel }
+
         it "raises a record not found error" do
           expect {
             start_import
-          }.to raise_error(ActiveRecord::RecordNotFound)
+          }.to raise_error(GpTableCopier::ImportFailed, /does not exist/)
         end
       end
 
       context "when a nonempty destination table already exists" do
+
+
+
+
         before do
-          call_sql("create table \"#{destination_table_name}\"(#{table_def}) #{distrib_def};")
-          call_sql("insert into \"#{destination_table_name}\"(id, name, id2, id3) values (11, 'marsbar-1', 31, 51);")
+          execute("create table \"#{destination_table_name}\"(#{table_def}) #{distrib_def};")
+          execute("insert into \"#{destination_table_name}\"(id, name, id2, id3) values (11, 'marsbar-1', 31, 51);")
           Dataset.refresh(account, schema)
         end
 
         it "appends the data to the existing table" do
           start_import
-          dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+          dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
           dest_rows.count.should == 3
         end
       end
@@ -81,27 +104,27 @@ describe GpTableCopier, :database_integration => true do
 
       context "when the destination table exists" do
         before do
-          call_sql("create table \"#{destination_table_name}\"(#{table_def}) #{distrib_def};")
+          execute("create table \"#{destination_table_name}\"(#{table_def}) #{distrib_def};")
           Dataset.refresh(account, schema)
         end
 
         it "creates a existing table copier and runs it" do
           start_import
-          dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+          dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
           dest_rows.count.should == 2
         end
 
         describe "when truncation is enabled" do
           before do
             attributes.merge!("truncate" => true)
-            call_sql("insert into \"#{destination_table_name}\"(id, name, id2, id3) values (11, 'marsbar-1', 31, 51);")
+            execute("insert into \"#{destination_table_name}\"(id, name, id2, id3) values (11, 'marsbar-1', 31, 51);")
           end
 
           it "it truncates the destination table and import fresh" do
-            dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+            dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
             dest_rows.count.should == 1
             start_import
-            dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+            dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
             dest_rows.count.should == 2
           end
         end
@@ -109,14 +132,14 @@ describe GpTableCopier, :database_integration => true do
         describe "when truncation is disabled" do
           before do
             attributes.merge!("truncate" => "false")
-            call_sql("insert into \"#{destination_table_name}\"(id, name, id2, id3) values (11, 'marsbar-1', 31, 51);")
+            execute("insert into \"#{destination_table_name}\"(id, name, id2, id3) values (11, 'marsbar-1', 31, 51);")
           end
 
           it "it truncates the destination table and import fresh" do
-            dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+            dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
             dest_rows.count.should == 1
             start_import
-            dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+            dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
             dest_rows.count.should == 3
           end
         end
@@ -126,7 +149,7 @@ describe GpTableCopier, :database_integration => true do
         it "it raises an exception" do
           expect {
             start_import
-          }.to raise_error(ActiveRecord::RecordNotFound, "Couldn't find destination table.")
+          }.to raise_error(GpTableCopier::ImportFailed, /"#{sandbox.name}.#{destination_table_name}" does not exist/)
         end
       end
     end
@@ -155,7 +178,7 @@ describe GpTableCopier, :database_integration => true do
 
       context "when creating a new table" do
         before do
-          call_sql("drop table if exists \"#{destination_table_name}\";")
+          execute("drop table if exists \"#{destination_table_name}\";")
         end
 
         it "should still work" do
@@ -172,7 +195,7 @@ describe GpTableCopier, :database_integration => true do
 
         before do
           attributes.merge!("new_table" => false)
-          call_sql("create table \"#{destination_table_name}\"(#{table_def}) DISTRIBUTED RANDOMLY;")
+          execute("create table \"#{destination_table_name}\"(#{table_def}) DISTRIBUTED RANDOMLY;")
           Dataset.refresh(account, schema)
         end
 
@@ -184,7 +207,7 @@ describe GpTableCopier, :database_integration => true do
       end
     end
 
-    context "with standard input" do
+    context "with standard input (the happy path?)" do
       before do
         start_import
         GpdbTable.refresh(account, schema)
@@ -195,26 +218,26 @@ describe GpTableCopier, :database_integration => true do
       end
 
       it "copies the constraints" do
-        dest_constraints = call_sql("SELECT constraint_type, table_name FROM information_schema.table_constraints WHERE table_name = '#{destination_table_name}'", sandbox)
-        src_constraints = call_sql("SELECT constraint_type, table_name FROM information_schema.table_constraints WHERE table_name = '#{source_table_name}'")
+        dest_constraints = get_rows("SELECT constraint_type, table_name FROM information_schema.table_constraints WHERE table_name = '#{destination_table_name}'", sandbox)
+        src_constraints = get_rows("SELECT constraint_type, table_name FROM information_schema.table_constraints WHERE table_name = '#{source_table_name}'")
 
         dest_constraints.count.should == src_constraints.count
         dest_constraints.each_with_index do |constraint, i|
-          constraint["constraint_type"].should == src_constraints[i]["constraint_type"]
-          constraint["table_name"].should == destination_table_name
+          constraint[:constraint_type].should == src_constraints[i][:constraint_type]
+          constraint[:table_name].should == destination_table_name
         end
       end
 
       it "copies the distribution keys" do
-        dest_distribution_keys = call_sql(distribution_key_sql(sandbox.name, destination_table_name), sandbox)
-        src_distribution_keys = call_sql(distribution_key_sql(schema.name, source_table_name))
+        dest_distribution_keys = get_rows(distribution_key_sql(sandbox.name, destination_table_name), sandbox)
+        src_distribution_keys = get_rows(distribution_key_sql(schema.name, source_table_name))
 
         dest_distribution_keys.should == src_distribution_keys
       end
 
 
       it "copies the rows" do
-        dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+        dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
         dest_rows.count.should == 2
       end
     end
@@ -227,7 +250,7 @@ describe GpTableCopier, :database_integration => true do
       end
 
       it "copies the rows up to limit" do
-        dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+        dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
         dest_rows.count.should == 1
       end
     end
@@ -240,7 +263,7 @@ describe GpTableCopier, :database_integration => true do
       it "creates the table and copies 0 rows" do
         start_import
         GpdbTable.refresh(account, schema)
-        dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+        dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
         dest_rows.count.should == 0
       end
     end
@@ -252,7 +275,7 @@ describe GpTableCopier, :database_integration => true do
         start_import
         GpdbTable.refresh(account, sandbox)
         database.find_dataset_in_schema(destination_table_name, sandbox.name).should be_a(GpdbTable)
-        dest_rows = call_sql("SELECT * FROM #{destination_table_name}", sandbox)
+        dest_rows = get_rows("SELECT * FROM #{destination_table_name}", sandbox)
         dest_rows.count.should == 2
       end
     end
@@ -263,7 +286,7 @@ describe GpTableCopier, :database_integration => true do
       it "raises an exception" do
         expect {
           start_import
-        }.to raise_error(GpTableCopier::ImportFailed, /duplicate key violates unique constraint/)
+        }.to raise_exception(GpTableCopier::ImportFailed, /(duplicate key|already exists)/)
       end
     end
 
@@ -273,7 +296,7 @@ describe GpTableCopier, :database_integration => true do
 
       it "single quotes table and schema names if they have weird chars" do
         start_import
-        call_sql("SELECT * FROM #{destination_table_fullname}").length.should == 2
+        get_rows("SELECT * FROM #{destination_table_fullname}").length.should == 2
       end
     end
 
@@ -282,7 +305,7 @@ describe GpTableCopier, :database_integration => true do
 
       it "creates an empty destination table" do
         start_import
-        call_sql("SELECT * FROM #{destination_table_fullname}").length.should == 0
+        get_rows("SELECT * FROM #{destination_table_fullname}").length.should == 0
       end
     end
 
@@ -314,16 +337,12 @@ describe GpTableCopier, :database_integration => true do
   end
 
   describe "#table_definition" do
-    let(:copier) { GpTableCopier.new(source_dataset.id, user.id, attributes) }
+    let(:copier) { GpTableCopier.new(gpdb_database_path, attributes) }
     let(:definition) do
-      schema.with_gpdb_connection(account) do |conn|
-        copier.table_definition(conn)
-      end
+      copier.table_definition
     end
     let(:definition_with_keys) do
-      schema.with_gpdb_connection(account) do |conn|
-        copier.table_definition_with_keys(conn)
-      end
+      copier.table_definition_with_keys
     end
 
     context "for a table with 0 columns" do
@@ -367,10 +386,13 @@ describe GpTableCopier, :database_integration => true do
     end
   end
 
-  def call_sql(sql_command, schema = schema, account = account)
-    schema.with_gpdb_connection(account) do |connection|
-      connection.exec_query(sql_command)
-    end
+  def execute(sql_command, schema = schema, method = :run)
+    test_gpdb_database_path.run("set search_path to #{schema.name}, public;")
+    test_gpdb_database_path.send(method, sql_command)
+  end
+
+  def get_rows(sql_command, schema = schema)
+    execute(sql_command, schema, :fetch).all
   end
 
   def distribution_key_sql(schema_name, table_name)

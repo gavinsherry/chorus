@@ -338,6 +338,10 @@ class Dataset < ActiveRecord::Base
     'dataset'
   end
 
+  def as_sequel
+    Sequel.qualify(schema.name, name)
+  end
+
   private
 
   def create_import_event(params, user)
