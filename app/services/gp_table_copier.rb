@@ -16,12 +16,19 @@ class GpTableCopier
   end
 
   def start
-    # delegate cross-database copies to a GpPipe instance
-    if true#destination_schema.database == database_path.database
+    if source_database == destination_database
       run
     else
-      GpPipe.new(self).run
+      GpPipe.new(self).run # delegate cross-database copies to a GpPipe instance
     end
+  end
+
+  def source_database
+    attributes["from_database"] || database
+  end
+
+  def destination_database
+    database
   end
 
   def distribution_key_clause
@@ -88,19 +95,19 @@ class GpTableCopier
   end
 
   def destination_table_fullname
-    @destination_table_fullname ||= qualified_table_name(destination_table)
+    qualified_table_name(destination_table)
   end
 
   def destination_table
     Sequel.qualify(attributes[:sandbox_name], attributes[:to_table])
   end
 
-  def source_table_path
-    @source_table_path ||=  qualified_table_name(source_table)
+  def destination_schema_name
+    destination_table.table
   end
 
   def source_table_fullname
-    @source_table_fullname ||= qualified_table_name(source_table)
+    qualified_table_name(source_table)
   end
 
   def source_schema_name

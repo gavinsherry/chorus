@@ -26,12 +26,12 @@ describe GpTableCopier, :database_integration => true do
                       "from_table" => from_table,
                       "new_table" => "true" } }
 
-  let(:gpdb_database_path) { Sequel.connect(Gpdb::ConnectionBuilder.url(database, account), :logger => Rails.logger) }
-  let(:test_gpdb_database_path) { Sequel.connect(Gpdb::ConnectionBuilder.url(database, account)) }
+  let(:gpdb_database) { Sequel.connect(Gpdb::ConnectionBuilder.url(database, account), :logger => Rails.logger) }
+  let(:test_gpdb_database) { Sequel.connect(Gpdb::ConnectionBuilder.url(database, account)) }
   let(:add_rows) { true }
   let(:workspace) { FactoryGirl.create :workspace, :owner => user, :sandbox => sandbox }
   let(:import) { imports(:two) }
-  let(:copier) { GpTableCopier.new(gpdb_database_path, attributes) }
+  let(:copier) { GpTableCopier.new(gpdb_database, attributes) }
   let(:start_import ) { copier.start }
 
   #after do
@@ -158,6 +158,10 @@ describe GpTableCopier, :database_integration => true do
       let(:source_dataset) {
         FactoryGirl.create :gpdb_table
       }
+
+      before do
+        attributes["from_database"] = "Fake database URL"
+      end
 
       it "runs GpPipe.run instead of it's own run" do
         any_instance_of(GpTableCopier) do |copier|
@@ -337,7 +341,7 @@ describe GpTableCopier, :database_integration => true do
   end
 
   describe "#table_definition" do
-    let(:copier) { GpTableCopier.new(gpdb_database_path, attributes) }
+    let(:copier) { GpTableCopier.new(gpdb_database, attributes) }
     let(:definition) do
       copier.table_definition
     end
@@ -387,8 +391,8 @@ describe GpTableCopier, :database_integration => true do
   end
 
   def execute(sql_command, schema = schema, method = :run)
-    test_gpdb_database_path.run("set search_path to #{schema.name}, public;")
-    test_gpdb_database_path.send(method, sql_command)
+    test_gpdb_database.run("set search_path to #{schema.name}, public;")
+    test_gpdb_database.send(method, sql_command)
   end
 
   def get_rows(sql_command, schema = schema)
